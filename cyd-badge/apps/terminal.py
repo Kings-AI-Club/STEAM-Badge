@@ -2,7 +2,7 @@
 Terminal - htop-like system monitor for ESP32 CYD.
 
 Shows real-time RAM, CPU, and disk usage with
-90s hacker terminal aesthetic.
+90s hacker terminal aesthetic. Only refreshes dynamic values.
 """
 import gc
 import os
@@ -26,20 +26,55 @@ BAR_HIGH = rgb(255, 50, 30)
 BORDER = rgb(0, 100, 30)
 CYAN = rgb(0, 200, 220)
 
+# ─── Layout positions ──────────────────────────────────────────
+
+BAR_X = 120
+BAR_W = 160
+BAR_H = 10
+VAL_X = 40
+PCT_X = WIDTH - 35
+
+ROW_CPU = 28
+ROW_RAM = 46
+ROW_DSK = 64
+ROW_UPT = HEIGHT - 12
+ROW_CPU_VAL = ROW_CPU
+ROW_RAM_VAL = ROW_RAM
+ROW_DSK_VAL = ROW_DSK
+
 # ─── State ──────────────────────────────────────────────────────
 
 _back_btn = None
 _needs_full_draw = True
 _last_update = 0
-_frame = 0
+_cpu_pct = 3
+_cpu_tick = 0
+_touching = False
+import math
+
+
+def _measure_cpu():
+    """Semi-fake CPU: oscillates near 0 idle, rises on touch."""
+    global _cpu_pct, _cpu_tick
+    _cpu_tick += 1
+    if _touching:
+        # Touch active — spike to 40-75%
+        wave = int(math.sin(_cpu_tick * 0.7) * 18)
+        _cpu_pct = 55 + wave
+    else:
+        # Idle — oscillate 2-8%
+        wave = int(math.sin(_cpu_tick * 0.4) * 3)
+        _cpu_pct = 5 + wave
+    _cpu_pct = max(1, min(99, _cpu_pct))
+    return _cpu_pct
 
 
 def init():
     """Initialize terminal app."""
-    global _back_btn, _needs_full_draw, _last_update, _frame
+    global _back_btn, _needs_full_draw, _last_update, _cpu_tick
     _needs_full_draw = True
     _last_update = 0
-    _frame = 0
+    _cpu_tick = 0
     gc.collect()
 
 
@@ -53,15 +88,20 @@ def _bar_color(pct):
 
 
 def _draw_bar(x, y, w, h, pct, color):
-    """Draw a usage bar with border."""
+    """Draw a usage bar."""
     display.fill_rect(x, y, w, h, BAR_BG)
     filled = max(1, int(w * pct / 100))
     display.fill_rect(x, y, filled, h, color)
     display.rect(x, y, w, h, TERM_DARK)
 
 
-def _draw_stats():
-    """Draw all system stats."""
+def _clear_value(x, y, w):
+    """Clear a value area for redraw."""
+    display.fill_rect(x, y - 1, w, 11, TERM_BG)
+
+
+def _draw_static():
+    """Draw static elements that don't change."""
     global _back_btn
 
     display.fill(TERM_BG)
@@ -76,32 +116,66 @@ def _draw_stats():
     # Separator
     display.hline(0, 22, WIDTH, TERM_DARK)
 
-    # ─── CPU Info ───────────────────────────────────────
-    y = 28
-    freq_mhz = machine.freq() // 1_000_000
-    display.text("CPU", 8, y, CYAN)
-    display.text("{}MHz".format(freq_mhz), 40, y, TERM_GREEN)
-    # Fake CPU bar (ESP32 doesn't expose real CPU usage)
-    # Show frequency as percentage of max (240MHz)
-    cpu_pct = min(100, freq_mhz * 100 // 240)
-    _draw_bar(120, y - 1, 185, 10, cpu_pct, _bar_color(cpu_pct))
-    display.text("{}%".format(cpu_pct), WIDTH - 35, y, TERM_DIM)
+    # Row labels
+    display.text("CPU", 8, ROW_CPU, CYAN)
+    display.text("RAM", 8, ROW_RAM, CYAN)
+    display.text("DSK", 8, ROW_DSK, CYAN)
 
-    # ─── RAM Usage ──────────────────────────────────────
-    y = 46
+    # Separator
+    display.hline(0, 80, WIDTH, TERM_DARK)
+
+    # System info header
+    display.text("SYSTEM INFO", 8, 86, CYAN)
+    freq_mhz = machine.freq() // 1_000_000
+    display.text("Chip:  ESP32-D0WD-V3", 8, 100, TERM_GREEN)
+    display.text("Freq:  {}MHz".format(freq_mhz), 8, 112, TERM_GREEN)
+
+    # Separator
+    display.hline(0, 150, WIDTH, TERM_DARK)
+
+    # Process list header
+    display.text("  PID  CMD          MEM   STATE", 8, 156, CYAN)
+
+    procs = [
+        ("  1", "badge_os", "RUN"),
+        ("  2", "display_drv", "RUN"),
+        ("  3", "touch_drv", "RUN"),
+        ("  4", "gc_worker", "IDLE"),
+        ("  5", "wifi_mgr", "STOP"),
+    ]
+    y = 168
+    for pid, cmd, st in procs:
+        st_color = TERM_GREEN if st == "RUN" else TERM_DIM
+        display.text(pid, 8, y, TERM_DIM)
+        display.text(cmd, 48, y, TERM_GREEN)
+        display.text(st, 210, y, st_color)
+        y += 11
+
+    # Footer separator
+    display.hline(0, HEIGHT - 16, WIDTH, TERM_DARK)
+    display.hline(0, HEIGHT - 1, WIDTH, BORDER)
+
+
+def _update_dynamic():
+    """Update only the dynamic values (bars, numbers, uptime)."""
+    # ─── CPU ────────────────────────────────────────────
+    cpu = _measure_cpu()
+    _clear_value(VAL_X, ROW_CPU, 76)
+    display.text("{}%".format(cpu), VAL_X, ROW_CPU, TERM_GREEN)
+    _draw_bar(BAR_X, ROW_CPU - 1, BAR_W, BAR_H, cpu, _bar_color(cpu))
+
+    # ─── RAM ────────────────────────────────────────────
     gc.collect()
     mem_free = gc.mem_free()
     mem_alloc = gc.mem_alloc()
     mem_total = mem_free + mem_alloc
     mem_pct = mem_alloc * 100 // mem_total if mem_total > 0 else 0
-    display.text("RAM", 8, y, CYAN)
+    _clear_value(VAL_X, ROW_RAM, 76)
     display.text("{}/{}K".format(mem_alloc // 1024, mem_total // 1024),
-                 40, y, TERM_GREEN)
-    _draw_bar(120, y - 1, 185, 10, mem_pct, _bar_color(mem_pct))
-    display.text("{}%".format(mem_pct), WIDTH - 35, y, TERM_DIM)
+                 VAL_X, ROW_RAM, TERM_GREEN)
+    _draw_bar(BAR_X, ROW_RAM - 1, BAR_W, BAR_H, mem_pct, _bar_color(mem_pct))
 
-    # ─── Disk Usage ─────────────────────────────────────
-    y = 64
+    # ─── Disk ───────────────────────────────────────────
     try:
         stat = os.statvfs('/')
         blk_size = stat[0]
@@ -110,67 +184,34 @@ def _draw_stats():
         disk_total = blk_size * blk_total
         disk_used = blk_size * (blk_total - blk_free)
         disk_pct = disk_used * 100 // disk_total if disk_total > 0 else 0
-        display.text("DSK", 8, y, CYAN)
+        _clear_value(VAL_X, ROW_DSK, 76)
         display.text("{}/{}K".format(disk_used // 1024,
                                      disk_total // 1024),
-                     40, y, TERM_GREEN)
-        _draw_bar(120, y - 1, 185, 10, disk_pct, _bar_color(disk_pct))
-        display.text("{}%".format(disk_pct), WIDTH - 35, y, TERM_DIM)
+                     VAL_X, ROW_DSK, TERM_GREEN)
+        _draw_bar(BAR_X, ROW_DSK - 1, BAR_W, BAR_H, disk_pct,
+                  _bar_color(disk_pct))
     except OSError:
-        display.text("DSK  N/A", 8, y, TERM_DIM)
+        pass
 
-    # ─── Separator ──────────────────────────────────────
-    display.hline(0, 80, WIDTH, TERM_DARK)
+    # ─── Dynamic system info ────────────────────────────
+    _clear_value(8, 124, 200)
+    mem_free_kb = mem_free // 1024
+    display.text("Heap:  {}KB free".format(mem_free_kb), 8, 124, TERM_GREEN)
+    _clear_value(8, 136, 200)
+    try:
+        flash_free = (blk_size * blk_free) // 1024
+        display.text("Flash: {}KB free".format(flash_free), 8, 136,
+                     TERM_GREEN)
+    except Exception:
+        pass
 
-    # ─── System Details ─────────────────────────────────
-    y = 86
-    display.text("SYSTEM INFO", 8, y, CYAN)
-    y += 14
-    display.text("Chip:  ESP32-D0WD-V3", 8, y, TERM_GREEN)
-    y += 12
-    display.text("Freq:  {}MHz".format(freq_mhz), 8, y, TERM_GREEN)
-    y += 12
-    display.text("Flash: {}KB free".format(
-        (blk_size * blk_free) // 1024 if 'blk_free' in dir() else 0),
-        8, y, TERM_GREEN)
-    y += 12
-    display.text("Heap:  {}KB free".format(mem_free // 1024),
-                 8, y, TERM_GREEN)
-
-    # ─── Separator ──────────────────────────────────────
-    display.hline(0, 150, WIDTH, TERM_DARK)
-
-    # ─── Process List (fake htop style) ─────────────────
-    y = 156
-    display.text("  PID  CMD          MEM   STATE", 8, y, CYAN)
-    y += 12
-
-    procs = [
-        ("  1", "badge_os", "{}K".format(mem_alloc // 2048), "RUN"),
-        ("  2", "display_drv", "5K", "RUN"),
-        ("  3", "touch_drv", "2K", "RUN"),
-        ("  4", "gc_worker", "1K", "IDLE"),
-        ("  5", "wifi_mgr", "0K", "STOP"),
-    ]
-
-    for pid, cmd, mem, st in procs:
-        st_color = TERM_GREEN if st == "RUN" else TERM_DIM
-        display.text(pid, 8, y, TERM_DIM)
-        display.text(cmd, 48, y, TERM_GREEN)
-        display.text(mem, 168, y, TERM_DIM)
-        display.text(st, 210, y, st_color)
-        y += 11
-
-    # ─── Footer ─────────────────────────────────────────
-    display.hline(0, HEIGHT - 16, WIDTH, TERM_DARK)
+    # ─── Uptime ─────────────────────────────────────────
+    _clear_value(8, ROW_UPT, 200)
     uptime_s = time.ticks_ms() // 1000
     m = uptime_s // 60
     s = uptime_s % 60
-    display.text("Uptime: {}m {}s".format(m, s), 8, HEIGHT - 12, TERM_DIM)
-    display.text("[LIVE]", WIDTH - 52, HEIGHT - 12, TERM_GREEN)
-
-    # Bottom border
-    display.hline(0, HEIGHT - 1, WIDTH, BORDER)
+    display.text("Uptime: {}m {}s".format(m, s), 8, ROW_UPT, TERM_DIM)
+    display.text("[LIVE]", WIDTH - 52, ROW_UPT, TERM_GREEN)
 
     if display._full_fb:
         display.show()
@@ -178,25 +219,28 @@ def _draw_stats():
 
 def update(touch_pos):
     """Update terminal display."""
-    global _needs_full_draw, _last_update, _back_btn, _frame
+    global _needs_full_draw, _last_update, _back_btn, _touching
 
-    _frame += 1
     ticks = time.ticks_ms()
 
     if _needs_full_draw:
         _needs_full_draw = False
-        _draw_stats()
+        _draw_static()
+        _update_dynamic()
         _last_update = ticks
         return None
+
+    # Track touch for CPU meter
+    _touching = touch_pos is not None
 
     # Check back button
     if touch_pos:
         if check_back_button(touch_pos, _back_btn):
             return None
 
-    # Refresh stats every 2 seconds
-    if time.ticks_diff(ticks, _last_update) > 2000:
-        _draw_stats()
+    # Refresh dynamic values every 1 second
+    if time.ticks_diff(ticks, _last_update) > 1000:
+        _update_dynamic()
         _last_update = ticks
 
     return None

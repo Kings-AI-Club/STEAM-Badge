@@ -34,7 +34,7 @@ while True:
             badge_os._back_to_menu = False
 
             init_fn = getattr(app_module, 'init', None)
-            fps = 25 if result == "tennis" else 10
+            fps = 25 if result == "pong" else 10
             run_app(app_module.update, init_fn, fps)
 
             # Clean up the app module
