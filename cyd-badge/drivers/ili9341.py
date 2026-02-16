@@ -46,8 +46,9 @@ _ROTATIONS = {
 
 
 def color565(r, g, b):
-    """Convert RGB888 to RGB565, byte-swapped for ILI9341/framebuf."""
-    c = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+    """Convert RGB888 to BGR565, byte-swapped for ILI9341 (BGR panel)."""
+    # ILI9341 with MADCTL_BGR: bits 15-11=Blue, 10-5=Green, 4-0=Red
+    c = ((b & 0xF8) << 8) | ((g & 0xFC) << 3) | (r >> 3)
     # Byte-swap so framebuf stores in ILI9341's big-endian order
     return ((c & 0xFF) << 8) | ((c >> 8) & 0xFF)
 
