@@ -16,6 +16,7 @@ APPS = [
     {"name": "Badge", "module": "badge", "color": rgb(0, 255, 100)},
     {"name": "Sketch", "module": "sketch", "color": rgb(0, 200, 255)},
     {"name": "Pong", "module": "pong", "color": rgb(255, 50, 50)},
+    {"name": "Tetris", "module": "tetris", "color": rgb(200, 100, 255)},
     {"name": "Term", "module": "terminal", "color": rgb(200, 200, 0)},
 ]
 
@@ -30,11 +31,11 @@ BORDER_GREEN = rgb(0, 180, 60)
 
 # ─── Layout ─────────────────────────────────────────────────────
 
-COLS = 4
-TILE_W = 64
-TILE_H = 70
+COLS_TOP = 3
+COLS_BOT = 2
+TILE_W = 76
+TILE_H = 58
 TILE_PAD = 10
-GRID_X = (WIDTH - (COLS * TILE_W + (COLS - 1) * TILE_PAD)) // 2
 GRID_Y = 70
 
 APP_BUTTONS = []
@@ -81,6 +82,13 @@ def _draw_tile(i):
         # Terminal icon
         display.rect(icon_cx - 12, icon_cy - 8, 24, 16, rgb(200, 200, 0))
         display.text(">_", icon_cx - 8, icon_cy - 4, rgb(200, 200, 0))
+    elif app["module"] == "tetris":
+        # Tetris icon (L-piece falling)
+        tc = rgb(200, 100, 255)
+        display.fill_rect(icon_cx - 6, icon_cy - 8, 6, 6, tc)
+        display.fill_rect(icon_cx - 6, icon_cy - 2, 6, 6, tc)
+        display.fill_rect(icon_cx, icon_cy - 2, 6, 6, tc)
+        display.fill_rect(icon_cx - 6, icon_cy + 4, 6, 6, tc)
 
     # Label
     tw = bitmap_font.measure_text(app["name"])
@@ -139,9 +147,16 @@ def init():
     APP_BUTTONS.clear()
 
     for i, app in enumerate(APPS):
-        col = i % COLS
-        row = i // COLS
-        x = GRID_X + col * (TILE_W + TILE_PAD)
+        if i < COLS_TOP:
+            col = i
+            row = 0
+            total_w = COLS_TOP * TILE_W + (COLS_TOP - 1) * TILE_PAD
+        else:
+            col = i - COLS_TOP
+            row = 1
+            total_w = COLS_BOT * TILE_W + (COLS_BOT - 1) * TILE_PAD
+        gx = (WIDTH - total_w) // 2
+        x = gx + col * (TILE_W + TILE_PAD)
         y = GRID_Y + row * (TILE_H + TILE_PAD)
         APP_BUTTONS.append(TouchButton(x, y, TILE_W, TILE_H,
                                        app["name"], app["color"]))
