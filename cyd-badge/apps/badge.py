@@ -1,8 +1,8 @@
 """
-Badge App - Indie game-style nameplate with rainbow animations.
+Badge App - Indie game-style nameplate with color gradient animation.
 
-Smooth floating rainbow name, 4:3 portrait photo,
-retro pixel-art aesthetic.
+Fast yellow-blue gradient cycling on name text,
+4:3 portrait photo, retro pixel-art aesthetic.
 """
 import gc
 import time
@@ -25,27 +25,20 @@ TEXT_DIM = rgb(140, 120, 180)
 STAR_CLR = rgb(255, 255, 180)
 
 CX = WIDTH // 2
+SCALE = 3
 
-# ─── Rainbow helper ─────────────────────────────────────────────
-
-def _hue_rgb(hue):
-    h = hue % 360
-    c = 1.0
-    x = c * (1.0 - abs((h / 60.0) % 2 - 1.0))
-    if h < 60:
-        r, g, b = c, x, 0
-    elif h < 120:
-        r, g, b = x, c, 0
-    elif h < 180:
-        r, g, b = 0, c, x
-    elif h < 240:
-        r, g, b = 0, x, c
-    elif h < 300:
-        r, g, b = x, 0, c
-    else:
-        r, g, b = c, 0, x
-    return rgb(int(r * 255), int(g * 255), int(b * 255))
-
+# Pre-compute 32-step round-trip gradient: yellow -> blue -> yellow
+_GRAD = []
+for _i in range(16):
+    _t = _i / 15.0
+    _r = int(255 * (1.0 - _t) + 80 * _t)
+    _g = int(230 * (1.0 - _t) + 120 * _t)
+    _b = int(50 * (1.0 - _t) + 255 * _t)
+    _GRAD.append(rgb(_r, _g, _b))
+for _i in range(14, 0, -1):
+    _GRAD.append(_GRAD[_i])
+# Total: 30 entries, smooth round-trip
+_GLEN = len(_GRAD)
 
 # ─── State ──────────────────────────────────────────────────────
 
@@ -56,15 +49,8 @@ _last_touch = 0
 rear_view = False
 _tick = 0
 
-# Layout cache
-_tx = 0
-_tw = 0
-_l1 = ""
-_l2 = ""
-_l1x = 0
-_l2x = 0
-_l1y = 0
-_l2y = 0
+# Per-character data: [(char, x, y)]
+_chars = []
 
 
 def init():
@@ -91,7 +77,7 @@ def _pborder(x, y, w, h):
     display.vline(x + w - 2, y, h, FRAME_LO)
 
 
-def _stars():
+def _bg_stars():
     for sx, sy in [(28, 8), (295, 20), (12, 195), (305, 190),
                    (50, 220), (275, 5), (185, 225)]:
         display.pixel(sx, sy, STAR_CLR)
@@ -103,28 +89,24 @@ def _stars():
 
 def _draw_static():
     """Draw all static elements once."""
-    global back_btn, _tx, _tw
-    global _l1, _l2, _l1x, _l2x, _l1y, _l2y
+    global back_btn, _l1, _l2, _l1x, _l2x, _l1y, _l2y
 
     display.fill(BG_DARK)
     back_btn = draw_back_button()
-    _stars()
+    _bg_stars()
 
-    # Main panel — pushed down to clear Menu button
     px, py = 8, 26
-    pw, ph = WIDTH - 16, HEIGHT - 50  # 304 x 190
+    pw, ph = WIDTH - 16, HEIGHT - 50
 
     display.fill_rect(px, py, pw, ph, BG_MID)
     _pborder(px, py, pw, ph)
 
-    # Corner diamonds
     for dx, dy in [(px + 4, py + 4), (px + pw - 7, py + 4)]:
         display.pixel(dx, dy, ACCENT)
         display.pixel(dx + 1, dy - 1, ACCENT)
         display.pixel(dx + 2, dy, ACCENT)
         display.pixel(dx + 1, dy + 1, ACCENT)
 
-    # Photo frame
     if avatar_img:
         iw, ih, _ = avatar_img
     else:
@@ -142,73 +124,57 @@ def _draw_static():
     if avatar_img:
         draw_image(fx + fp, fy + fp, avatar_img)
 
-    # Text area
     tx = fx + fw + 8
     tw = px + pw - tx - 4
-    _tx = tx
-    _tw = tw
 
-    # "Hello! I am" — scale 1, light blue, not caps
-    hello = "Hello! I am"
-    hw = bitmap_font.measure_text(hello, 1)
-    hx = tx + max(0, (tw - hw) // 2)
-    bitmap_font.draw_text(display, hello, hx, py + 10, HELLO_CLR, 1)
+    img_top = fy + fp
+    bitmap_font.draw_text(display, "Hello! I am", tx, img_top, HELLO_CLR, 1)
+    display.hline(tx, img_top + 18, tw, FRAME_CLR)
 
-    # Separator
-    display.hline(tx, py + 28, tw, FRAME_CLR)
-
-    # Split name
     name = badge_config.NAME
     parts = name.split()
-    if len(parts) >= 2:
-        _l1 = parts[0]
-        _l2 = " ".join(parts[1:])
-    else:
-        _l1 = name
-        _l2 = ""
+    l1 = parts[0] if parts else name
+    l2 = " ".join(parts[1:]) if len(parts) >= 2 else ""
 
-    # Name at scale 2 (32px tall), centered vertically in remaining space
-    # Available: from py+32 to py+ph = 158px of space
-    avail_top = py + 34
-    avail_bot = py + ph - 4
-    avail_h = avail_bot - avail_top
-    name_h = 32 + (36 if _l2 else 0)
-    name_top = avail_top + (avail_h - name_h) // 2
+    char_h = 16 * SCALE
+    name_top = img_top + 24
+    name_bot = py + ph - 6
+    block_h = char_h + (char_h + 4 if l2 else 0)
+    base_y = name_top + (name_bot - name_top - block_h) // 2
 
-    l1w = bitmap_font.measure_text(_l1, 2)
-    _l1x = tx + max(0, (tw - l1w) // 2)
-    _l1y = name_top
+    # Build per-character position list
+    _chars = []
+    cx = tx
+    for ch in l1:
+        cw = bitmap_font.measure_text(ch, SCALE)
+        _chars.append((ch, cx, base_y))
+        cx += cw
+    if l2:
+        cx = tx
+        y2 = base_y + char_h + 4
+        for ch in l2:
+            cw = bitmap_font.measure_text(ch, SCALE)
+            _chars.append((ch, cx, y2))
+            cx += cw
 
-    if _l2:
-        l2w = bitmap_font.measure_text(_l2, 2)
-        _l2x = tx + max(0, (tw - l2w) // 2)
-        _l2y = name_top + 36
+    # Initial draw
+    for idx, (ch, cx, cy) in enumerate(_chars):
+        bitmap_font.draw_char(display, ch, cx, cy, _GRAD[idx % _GLEN], SCALE)
 
-    # Draw name initially (will be overwritten each frame with new color)
-    bitmap_font.draw_text(display, _l1, _l1x, _l1y, ACCENT, 2)
-    if _l2:
-        bitmap_font.draw_text(display, _l2, _l2x, _l2y, ACCENT, 2)
-
-    # "Made by King's AI Seminar" between panel bottom and screen edge
     credit = "Made by King's AI Seminar"
-    cw = len(credit) * 8
     credit_y = py + ph + (HEIGHT - py - ph - 8) // 2
-    display.text(credit, CX - cw // 2, credit_y, TEXT_DIM)
+    display.text(credit, CX - len(credit) * 4, credit_y, TEXT_DIM)
 
     if display._full_fb:
         display.show()
 
 
 def _animate():
-    """Smooth rainbow color cycle — just overwrite text at same position."""
-    # Rainbow hue cycles — no erase, just redraw text with new color
-    hue = (_tick * 5) % 360
-    color1 = _hue_rgb(hue)
-    bitmap_font.draw_text(display, _l1, _l1x, _l1y, color1, 2)
-
-    if _l2:
-        color2 = _hue_rgb((hue + 80) % 360)
-        bitmap_font.draw_text(display, _l2, _l2x, _l2y, color2, 2)
+    """Flowing ribbon: gradient slides across letters."""
+    offset = _tick * 15  # speed of flow
+    for idx, (ch, cx, cy) in enumerate(_chars):
+        color = _GRAD[(offset + idx * 3) % _GLEN]
+        bitmap_font.draw_char(display, ch, cx, cy, color, SCALE)
 
     if display._full_fb:
         display.show()
@@ -219,7 +185,7 @@ def _draw_back():
 
     display.fill(BG_DARK)
     back_btn = draw_back_button()
-    _stars()
+    _bg_stars()
 
     px, py = 8, 26
     pw, ph = WIDTH - 16, HEIGHT - 50
@@ -239,11 +205,9 @@ def _draw_back():
         sy += 36
 
     display.hline(px + 10, py + ph - 18, pw - 20, FRAME_CLR)
-
     credit = "Made by King's AI Seminar"
-    cw = len(credit) * 8
     credit_y = py + ph + (HEIGHT - py - ph - 8) // 2
-    display.text(credit, CX - cw // 2, credit_y, TEXT_DIM)
+    display.text(credit, CX - len(credit) * 4, credit_y, TEXT_DIM)
 
     if display._full_fb:
         display.show()

@@ -4,7 +4,7 @@ Edit this file with your personal details before uploading to the ESP32 CYD.
 """
 
 # Your name badge details
-NAME = "Rev Edward"
+NAME = "Michael Ienna"
 ROLE = ""
 
 # Social media handles (shown on badge back)
