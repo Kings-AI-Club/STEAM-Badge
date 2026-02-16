@@ -15,7 +15,7 @@ import struct
 from pillow_heif import register_heif_opener
 register_heif_opener()
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 # Output dimensions (3:4 portrait ≈ 1/3 of 320px screen width)
 OUT_W = 96
@@ -57,7 +57,7 @@ def main():
 
     if not os.path.exists(src):
         print(f"Error: Image not found: {src}")
-        print(f"Usage: conda run -n badge-tools python3 {sys.argv[0]} <path_to_image>")
+        print(f"Usage: conda run -n badge-tools python {sys.argv[0]} <path_to_image>")
         sys.exit(1)
 
     print(f"Input:  {src}")
@@ -67,8 +67,18 @@ def main():
     img = Image.open(src)
     print(f"  Original: {img.size[0]}x{img.size[1]} {img.mode}")
 
+    # Apply EXIF rotation (phones often store rotated images)
+    img = ImageOps.exif_transpose(img)
+    print(f"  After EXIF fix: {img.size[0]}x{img.size[1]}")
+
     # Convert to RGB
     img = img.convert("RGB")
+
+    # Ensure portrait orientation (taller than wide)
+    w, h = img.size
+    if w > h:
+        img = img.rotate(90, expand=True)
+        print(f"  Rotated to portrait: {img.size[0]}x{img.size[1]}")
 
     # Crop to 3:4 portrait ratio
     img = crop_portrait_3_4(img)

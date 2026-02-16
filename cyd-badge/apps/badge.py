@@ -27,7 +27,7 @@ STAR_CLR = rgb(255, 255, 180)
 CX = WIDTH // 2
 SCALE = 3
 
-# Pre-compute 32-step round-trip gradient: yellow -> blue -> yellow
+# Pre-compute 30-step round-trip gradient: yellow -> blue -> yellow
 _GRAD = []
 for _i in range(16):
     _t = _i / 15.0
@@ -37,7 +37,6 @@ for _i in range(16):
     _GRAD.append(rgb(_r, _g, _b))
 for _i in range(14, 0, -1):
     _GRAD.append(_GRAD[_i])
-# Total: 30 entries, smooth round-trip
 _GLEN = len(_GRAD)
 
 # ─── State ──────────────────────────────────────────────────────
@@ -89,7 +88,7 @@ def _bg_stars():
 
 def _draw_static():
     """Draw all static elements once."""
-    global back_btn, _l1, _l2, _l1x, _l2x, _l1y, _l2y
+    global back_btn, _chars
 
     display.fill(BG_DARK)
     back_btn = draw_back_button()
@@ -128,7 +127,7 @@ def _draw_static():
     tw = px + pw - tx - 4
 
     img_top = fy + fp
-    bitmap_font.draw_text(display, "Hello! I am", tx, img_top, HELLO_CLR, 1)
+    bitmap_font.draw_text(display, "Hello! My Name is", tx, img_top, HELLO_CLR, 1)
     display.hline(tx, img_top + 18, tw, FRAME_CLR)
 
     name = badge_config.NAME
@@ -170,10 +169,12 @@ def _draw_static():
 
 
 def _animate():
-    """Flowing ribbon: gradient slides across letters."""
-    offset = _tick * 15  # speed of flow
+    """Flowing ribbon: gradient slides across all letters."""
+    n = len(_chars)
+    if n == 0:
+        return
     for idx, (ch, cx, cy) in enumerate(_chars):
-        color = _GRAD[(offset + idx * 3) % _GLEN]
+        color = _GRAD[(_tick * 2 + idx * 3) % _GLEN]
         bitmap_font.draw_char(display, ch, cx, cy, color, SCALE)
 
     if display._full_fb:

@@ -315,7 +315,7 @@ class ILI9341:
             self.blit_buffer(tmp_buf, x, y, text_width, 8)
 
     def blit_buffer(self, buf, x, y, w, h):
-        """Blit a raw RGB565 buffer to the display."""
+        """Blit a raw RGB565 buffer to the display (chunked for large images)."""
         x = max(0, x)
         y = max(0, y)
         x2 = min(self.width - 1, x + w - 1)
@@ -328,7 +328,13 @@ class ILI9341:
         self.dc(0)
         self.spi.write(bytes([_RAMWR]))
         self.dc(1)
-        self.spi.write(buf)
+        # Send in chunks to avoid SPI DMA overflow
+        mv = memoryview(buf)
+        total = len(buf)
+        chunk = 4096
+        for i in range(0, total, chunk):
+            end = min(i + chunk, total)
+            self.spi.write(mv[i:end])
         self.cs(1)
 
     def circle(self, cx, cy, r, c):
