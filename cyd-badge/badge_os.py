@@ -14,6 +14,7 @@ import json
 import os
 import time
 import struct
+import framebuf
 
 gc.collect()
 
@@ -59,11 +60,11 @@ def init_hardware():
     gc.collect()
 
     # Initialize ILI9341 display
-    display = ILI9341(rotation=3)
+    display = ILI9341(rotation=1)
     gc.collect()
 
     # Initialize XPT2046 touch
-    touch = XPT2046(rotation=3)
+    touch = XPT2046(rotation=1)
 
     # Clear screen
     display.fill(BLACK)
@@ -85,7 +86,9 @@ def load_image(filepath):
     with open(filepath, "rb") as f:
         header = f.read(4)
         w, h = struct.unpack("<HH", header)
-        data = f.read(w * h * 2)
+        # bytearray (not bytes) so draw_image can wrap it in a FrameBuffer
+        # without copying 24KB on every draw.
+        data = bytearray(f.read(w * h * 2))
     return w, h, data
 
 
@@ -93,14 +96,11 @@ def draw_image(x, y, img_data):
     """Draw a loaded image on screen."""
     w, h, data = img_data
     if display._full_fb:
-        idx = 0
-        for py in range(h):
-            for px in range(w):
-                if idx + 1 < len(data):
-                    c = data[idx] | (data[idx + 1] << 8)
-                    if c != 0:
-                        display.pixel(x + px, y + py, c)
-                idx += 2
+        # Blit at C speed. key=0 keeps the old behaviour of treating
+        # pure black as transparent; the previous per-pixel Python loop
+        # ran w*h iterations (12,288 for a 96x128 avatar) every draw.
+        src = framebuf.FrameBuffer(data, w, h, framebuf.RGB565)
+        display.fb.blit(src, x, y, 0)
     else:
         # Direct mode: blit the buffer directly
         display.blit_buffer(data, x, y, w, h)
@@ -199,6 +199,7 @@ def run_app(update_fn, init_fn=None, target_fps=20):
     _back_to_menu = False
 
     frame_ms = 1000 // target_fps
+    frame = 0
 
     if init_fn:
         init_fn()
@@ -222,12 +223,20 @@ def run_app(update_fn, init_fn=None, target_fps=20):
                 gc.collect()
                 return result
 
-            # Frame timing
+            # Collect periodically instead of every frame. A full collect
+            # costs several ms on the ESP32 — at 25 fps that was eating a
+            # large slice of the 40ms budget for no benefit. Collect early
+            # only when the heap is actually running low.
+            frame += 1
+            if frame >= 30 or gc.mem_free() < 12000:
+                frame = 0
+                gc.collect()
+
+            # Frame timing — measured last so it accounts for GC time,
+            # otherwise the sleep overshoots and the frame rate sags.
             elapsed = time.ticks_diff(time.ticks_ms(), start)
             if elapsed < frame_ms:
                 time.sleep_ms(frame_ms - elapsed)
-
-            gc.collect()
 
     except KeyboardInterrupt:
         raise  # Let it propagate to main.py for REPL access

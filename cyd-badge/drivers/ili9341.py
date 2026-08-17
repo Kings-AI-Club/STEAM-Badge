@@ -15,7 +15,6 @@ Pin configuration for ESP32 CYD:
 
 import gc
 import machine
-import struct
 import time
 import framebuf
 
@@ -39,9 +38,9 @@ _MADCTL_BGR = 0x08
 # Tuned for ESP32 CYD panel wiring
 _ROTATIONS = {
     0: (_MADCTL_BGR, 240, 320),
-    1: (_MADCTL_MV | _MADCTL_MX | _MADCTL_BGR, 320, 240),
+    1: (_MADCTL_MV | _MADCTL_BGR, 320, 240),
     2: (_MADCTL_MX | _MADCTL_MY | _MADCTL_BGR, 240, 320),
-    3: (_MADCTL_MV | _MADCTL_MY | _MADCTL_BGR, 320, 240),
+    3: (_MADCTL_MV | _MADCTL_MY | _MADCTL_MX | _MADCTL_BGR, 320, 240),
 }
 
 
@@ -56,7 +55,7 @@ def color565(r, g, b):
 class ILI9341:
     """ILI9341 display driver with framebuffer support."""
 
-    def __init__(self, spi=None, cs=15, dc=2, bl=21, rotation=3,
+    def __init__(self, spi=None, cs=15, dc=2, bl=21, rotation=1,
                  width=320, height=240):
         # Use provided SPI or create default
         if spi is None:
@@ -82,6 +81,17 @@ class ILI9341:
         self._full_fb = False
         self.buffer = None
         self.fb = None
+
+        # Pre-allocated scratch buffers — reused by every draw call so the
+        # hot paths never hit the heap (allocation here means GC pauses
+        # mid-frame, which is what caused the stutter in direct-draw mode).
+        self._cmd_buf = bytearray(1)
+        self._win_buf = bytearray(4)
+        self._px_buf = bytearray(2)
+        self._fill_color = None   # colour currently cached in _chunk_buf
+        self._text_buf = None     # scratch RGB565 buffer for text()
+        self._text_fb = None
+        self._text_w = 0
 
         # Try to allocate framebuffer — gc.collect() first for max free block
         gc.collect()
@@ -112,13 +122,44 @@ class ILI9341:
 
     def _write_cmd(self, cmd, data=None):
         """Write a command byte, optionally followed by data bytes."""
+        self._cmd_buf[0] = cmd
         self.cs(0)
         self.dc(0)
-        self.spi.write(bytes([cmd]))
+        self.spi.write(self._cmd_buf)
         if data is not None:
             self.dc(1)
             self.spi.write(data)
         self.cs(1)
+
+    def _begin_write(self):
+        """Open a pixel-data write (RAMWR) on the already-set window."""
+        self._cmd_buf[0] = _RAMWR
+        self.cs(0)
+        self.dc(0)
+        self.spi.write(self._cmd_buf)
+        self.dc(1)
+
+    def _color_chunk(self, c, nbytes):
+        """
+        Return a memoryview of nbytes filled with colour c.
+
+        The chunk buffer is filled by successive doubling, so the copying
+        happens in C via slice assignment instead of a per-pixel Python
+        loop. The result is cached, so repeated fills in the same colour
+        (the common case) skip the work entirely.
+        """
+        buf = self._chunk_buf
+        if c != self._fill_color:
+            buf[0] = c & 0xFF
+            buf[1] = (c >> 8) & 0xFF
+            size = len(buf)
+            filled = 2
+            while filled < size:
+                n = filled if filled * 2 <= size else size - filled
+                buf[filled:filled + n] = buf[:n]
+                filled += n
+            self._fill_color = c
+        return memoryview(buf)[:nbytes]
 
     def _init_display(self):
         """Initialize the ILI9341 display."""
@@ -128,7 +169,7 @@ class ILI9341:
         time.sleep_ms(150)
         self._write_cmd(_COLMOD, bytes([0x55]))
         madctl, self.width, self.height = _ROTATIONS.get(
-            self._rotation, _ROTATIONS[3]
+            self._rotation, _ROTATIONS[1]
         )
         self._write_cmd(_MADCTL, bytes([madctl]))
         self._write_cmd(_DISPON)
@@ -136,9 +177,18 @@ class ILI9341:
         self.bl(1)
 
     def _set_window(self, x0, y0, x1, y1):
-        """Set the drawing window."""
-        self._write_cmd(_CASET, struct.pack(">HH", x0, x1))
-        self._write_cmd(_RASET, struct.pack(">HH", y0, y1))
+        """Set the drawing window (allocation-free)."""
+        w = self._win_buf
+        w[0] = x0 >> 8
+        w[1] = x0 & 0xFF
+        w[2] = x1 >> 8
+        w[3] = x1 & 0xFF
+        self._write_cmd(_CASET, w)
+        w[0] = y0 >> 8
+        w[1] = y0 & 0xFF
+        w[2] = y1 >> 8
+        w[3] = y1 & 0xFF
+        self._write_cmd(_RASET, w)
 
     # ─── Framebuffer mode ───────────────────────────────────────
 
@@ -148,12 +198,11 @@ class ILI9341:
             return
 
         self._set_window(0, 0, self.width - 1, self.height - 1)
-        self.cs(0)
-        self.dc(0)
-        self.spi.write(bytes([_RAMWR]))
-        self.dc(1)
+        self._begin_write()
 
-        # Pre-swapped colors mean buffer is already in ILI9341 format
+        # Pre-swapped colors mean buffer is already in ILI9341 format.
+        # Chunked deliberately: the ESP32 SPI driver has a max DMA
+        # transfer size, so do not collapse this into one write().
         mv = memoryview(self.buffer)
         chunk = 4096
         for i in range(0, len(self.buffer), chunk):
@@ -173,19 +222,9 @@ class ILI9341:
     def _fill_direct(self, c):
         """Fill screen directly — optimized with chunked writes."""
         self._set_window(0, 0, self.width - 1, self.height - 1)
-        # Pre-swapped color: lo byte first gives correct SPI byte order
-        lo = c & 0xFF
-        hi = (c >> 8) & 0xFF
-        # Fill the chunk buffer with the color pattern
-        mv = memoryview(self._chunk_buf)
-        for i in range(0, self._chunk_size, 2):
-            mv[i] = lo
-            mv[i + 1] = hi
+        self._color_chunk(c, self._chunk_size)
 
-        self.cs(0)
-        self.dc(0)
-        self.spi.write(bytes([_RAMWR]))
-        self.dc(1)
+        self._begin_write()
         # Send 8 lines at a time (5120 bytes each)
         full_chunks = self.height // self._chunk_lines
         for _ in range(full_chunks):
@@ -202,13 +241,11 @@ class ILI9341:
         else:
             if 0 <= x < self.width and 0 <= y < self.height:
                 self._set_window(x, y, x, y)
-                lo = c & 0xFF
-                hi = (c >> 8) & 0xFF
-                self.cs(0)
-                self.dc(0)
-                self.spi.write(bytes([_RAMWR]))
-                self.dc(1)
-                self.spi.write(bytes([lo, hi]))
+                px = self._px_buf
+                px[0] = c & 0xFF
+                px[1] = (c >> 8) & 0xFF
+                self._begin_write()
+                self.spi.write(px)
                 self.cs(1)
 
     def fill_rect(self, x, y, w, h, c):
@@ -229,22 +266,15 @@ class ILI9341:
         w = x2 - x + 1
         h = y2 - y + 1
         self._set_window(x, y, x2, y2)
-        lo = c & 0xFF
-        hi = (c >> 8) & 0xFF
+        self._begin_write()
 
-        self.cs(0)
-        self.dc(0)
-        self.spi.write(bytes([_RAMWR]))
-        self.dc(1)
-
-        # For small rects, build and send directly
+        # Both paths reuse the cached colour chunk — no per-call allocation.
         total_bytes = w * h * 2
         if total_bytes <= self._chunk_size:
-            buf = bytes([lo, hi] * (w * h))
-            self.spi.write(buf)
+            self.spi.write(self._color_chunk(c, total_bytes))
         else:
-            # Larger rects: send row by row
-            row = bytes([lo, hi] * w)
+            # Larger rects: send row by row (a row is always <= chunk size)
+            row = self._color_chunk(c, w * 2)
             for _ in range(h):
                 self.spi.write(row)
         self.cs(1)
@@ -304,15 +334,22 @@ class ILI9341:
             self.fb.text(string, x, y, c)
         else:
             text_width = len(string) * 8
-            tmp_buf = bytearray(text_width * 8 * 2)
-            tmp_fb = framebuf.FrameBuffer(tmp_buf, text_width, 8,
-                                          framebuf.RGB565)
-            if bg is not None:
-                tmp_fb.fill(bg)
-            else:
-                tmp_fb.fill(0)
+            need = text_width * 8 * 2
+            # Reuse the scratch buffer; only grow it when a longer string
+            # shows up. The FrameBuffer is rebuilt only when width changes.
+            if self._text_buf is None or len(self._text_buf) < need:
+                self._text_buf = bytearray(need)
+                self._text_fb = None
+            if self._text_fb is None or self._text_w != text_width:
+                self._text_fb = framebuf.FrameBuffer(
+                    memoryview(self._text_buf)[:need], text_width, 8,
+                    framebuf.RGB565)
+                self._text_w = text_width
+            tmp_fb = self._text_fb
+            tmp_fb.fill(bg if bg is not None else 0)
             tmp_fb.text(string, 0, 0, c)
-            self.blit_buffer(tmp_buf, x, y, text_width, 8)
+            self.blit_buffer(memoryview(self._text_buf)[:need], x, y,
+                             text_width, 8)
 
     def blit_buffer(self, buf, x, y, w, h):
         """Blit a raw RGB565 buffer to the display (chunked for large images)."""
@@ -324,10 +361,7 @@ class ILI9341:
             return
 
         self._set_window(x, y, x2, y2)
-        self.cs(0)
-        self.dc(0)
-        self.spi.write(bytes([_RAMWR]))
-        self.dc(1)
+        self._begin_write()
         # Send in chunks to avoid SPI DMA overflow
         mv = memoryview(buf)
         total = len(buf)

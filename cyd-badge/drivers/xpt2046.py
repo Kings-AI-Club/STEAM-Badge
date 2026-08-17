@@ -23,7 +23,7 @@ class XPT2046:
     _CMD_Y = 0x90  # Channel select for Y position
 
     def __init__(self, spi=None, cs=33, irq=36,
-                 width=320, height=240, rotation=3,
+                 width=320, height=240, rotation=1,
                  x_min=200, x_max=3700, y_min=240, y_max=3800):
 
         if spi is None:
@@ -158,8 +158,8 @@ class XPT2046:
             # Portrait, USB bottom (240x320)
             return nx, ny
         elif self.rotation == 1:
-            # Landscape, USB right (320x240): screen_x=ny, screen_y=239-nx
-            return ny, 239 - nx
+            # Landscape, USB right (320x240): 180 degrees from rotation 3
+            return ny, nx
         elif self.rotation == 2:
             # Portrait, USB top (240x320): screen_x=239-nx, screen_y=319-ny
             return 239 - nx, 319 - ny
